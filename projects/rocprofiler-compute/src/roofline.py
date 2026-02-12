@@ -1357,14 +1357,14 @@ class Roofline:
 
             kernel_names = self.__ai_data.get("kernelNames", [])
             for i in range(len(self.__ai_data.get("kernelNames", []))):
-                # Skip if the intensity level is not finite
+                # Skip if either arithmetic intensity or performance is not finite
                 if not np.isfinite(self.__ai_data[key][0][i]) or not np.isfinite(
                     self.__ai_data[key][1][i]
                 ):
                     console_warning(
                         "roofline",
                         f"Skipping AI_{cache_level}_{kernel_names[i]} - "
-                        "intensity level is not finite",
+                        "arithmetic intensity or performance value is not finite",
                     )
                     continue
 
