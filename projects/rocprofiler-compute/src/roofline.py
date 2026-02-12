@@ -1357,6 +1357,17 @@ class Roofline:
 
             kernel_names = self.__ai_data.get("kernelNames", [])
             for i in range(len(self.__ai_data.get("kernelNames", []))):
+                # Skip if the intensity level is not finite
+                if not np.isfinite(self.__ai_data[key][0][i]) or not np.isfinite(
+                    self.__ai_data[key][1][i]
+                ):
+                    console_warning(
+                        "roofline",
+                        f"Skipping AI_{cache_level}_{kernel_names[i]} - "
+                        "intensity level is not finite",
+                    )
+                    continue
+
                 # Zero intensity level means no data reported for this cache level
                 if self.__ai_data[key][0][i] > 0 and self.__ai_data[key][1][i] > 0:
                     plt.plot(
