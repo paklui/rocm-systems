@@ -7878,6 +7878,263 @@ def test_validate_roofline_csv_invalid_inconsistent_columns():
 
 
 # =============================================================================
+# cli_generate_plot NON-FINITE VALUE TESTS
+# =============================================================================
+
+
+def create_ceiling_data():
+    """Create minimal ceiling_data dict for cli_generate_plot mocking."""
+    cd = {}
+    for key in ("hbm", "l2", "l1", "lds"):
+        cd[key] = [[0.01, 1000], [10, 10000], 500.0]
+    cd["valu"] = [[100, 1000], [5000, 5000], 5000.0]
+    cd["mfma"] = [[100, 1000], [8000, 8000], 8000.0]
+    return cd
+
+
+def create_roofline_instance(tmpdir):
+    """Create a Roofline instance with mocked args/specs pointing at tmpdir."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+    from roofline import Roofline
+    from utils.schema import ArchConfig, Workload
+
+    args = MockArgs(
+        roof_only=True,
+        mem_level="ALL",
+        sort="ALL",
+        roofline_data_type=["FP32"],
+    )
+    mspec = MockMSpec(gpu_model="mi300a", gpu_arch="gfx942")
+
+    run_parameters = {
+        "workload_dir": tmpdir,
+        "device_id": 0,
+        "sort_type": "kernels",
+        "mem_level": "ALL",
+        "is_standalone": True,
+        "roofline_data_type": ["FP32"],
+        "kernel_filter": False,
+        "iteration_multiplexing": None,
+    }
+
+    roofline_instance = Roofline(args, mspec, run_parameters)
+    workload = Workload()
+    # Provide a non-empty roofline_peaks so cli_generate_plot does not
+    # skip plot generation due to the empty-peaks guard.
+    workload.roofline_peaks = pd.DataFrame({"peak": [1.0]})
+    arch_config = ArchConfig()
+    config = {}
+
+    return roofline_instance, workload, config, arch_config
+
+
+def test_cli_generate_plot_skips_nan_values():
+    """
+    Test that cli_generate_plot skips kernels with NaN arithmetic intensity
+    values and emits a warning, while still plotting valid kernels.
+    """
+    import numpy as np
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create required roofline.csv
+        csv_path = Path(tmpdir) / "roofline.csv"
+        csv_path.write_text(
+            "device,HBMBw,L2Bw,L1Bw,LDSBw,FP32Flops,MFMAF32Flops\n"
+            "0,1000.0,2000.0,3000.0,4000.0,5000.0,8000.0\n"
+        )
+
+        roofline_instance, workload, config, arch_config = create_roofline_instance(
+            tmpdir
+        )
+
+        # ai_data: kernel0 has NaN x, kernel1 has NaN y, kernel2 is valid
+        ai_data = {
+            "ai_hbm": [[np.nan, 2.0, 5.0], [100.0, np.nan, 200.0]],
+            "kernelNames": ["kernel_nan_x", "kernel_nan_y", "kernel_valid"],
+        }
+
+        ceiling_data = create_ceiling_data()
+
+        with (
+            mock.patch("roofline.calc_ai_analyze", return_value=ai_data),
+            mock.patch("roofline.construct_roof", return_value=ceiling_data),
+            mock.patch("roofline.console_warning") as mock_warning,
+        ):
+            result = roofline_instance.cli_generate_plot(
+                "FP32", workload, config, arch_config
+            )
+
+        # Should not crash, should return a string
+        assert result is not None
+        assert isinstance(result, str)
+
+        # Collect warning messages about non-finite values
+        non_finite_warnings = [
+            call
+            for call in mock_warning.call_args_list
+            if len(call.args) >= 2 and "not finite" in str(call.args[1])
+        ]
+
+        # Should have warned about kernel_nan_x and kernel_nan_y
+        assert len(non_finite_warnings) == 2
+        warning_msgs = [str(call.args[1]) for call in non_finite_warnings]
+        assert any("kernel_nan_x" in msg for msg in warning_msgs)
+        assert any("kernel_nan_y" in msg for msg in warning_msgs)
+
+        # Should NOT have warned about kernel_valid
+        assert not any("kernel_valid" in msg for msg in warning_msgs)
+
+
+def test_cli_generate_plot_skips_inf_values():
+    """
+    Test that cli_generate_plot skips kernels with Inf/-Inf arithmetic
+    intensity values and emits a warning.
+    """
+    import numpy as np
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        csv_path = Path(tmpdir) / "roofline.csv"
+        csv_path.write_text(
+            "device,HBMBw,L2Bw,L1Bw,LDSBw,FP32Flops,MFMAF32Flops\n"
+            "0,1000.0,2000.0,3000.0,4000.0,5000.0,8000.0\n"
+        )
+
+        roofline_instance, workload, config, arch_config = create_roofline_instance(
+            tmpdir
+        )
+
+        # ai_data: kernel0 has +inf x, kernel1 has -inf y, kernel2 is valid
+        ai_data = {
+            "ai_hbm": [[np.inf, 3.0, 4.0], [150.0, -np.inf, 300.0]],
+            "kernelNames": ["kernel_inf_x", "kernel_neg_inf_y", "kernel_valid"],
+        }
+
+        ceiling_data = create_ceiling_data()
+
+        with (
+            mock.patch("roofline.calc_ai_analyze", return_value=ai_data),
+            mock.patch("roofline.construct_roof", return_value=ceiling_data),
+            mock.patch("roofline.console_warning") as mock_warning,
+        ):
+            result = roofline_instance.cli_generate_plot(
+                "FP32", workload, config, arch_config
+            )
+
+        assert result is not None
+        assert isinstance(result, str)
+
+        non_finite_warnings = [
+            call
+            for call in mock_warning.call_args_list
+            if len(call.args) >= 2 and "not finite" in str(call.args[1])
+        ]
+
+        assert len(non_finite_warnings) == 2
+        warning_msgs = [str(call.args[1]) for call in non_finite_warnings]
+        assert any("kernel_inf_x" in msg for msg in warning_msgs)
+        assert any("kernel_neg_inf_y" in msg for msg in warning_msgs)
+
+
+def test_cli_generate_plot_all_non_finite_values():
+    """
+    Test that cli_generate_plot handles the case where ALL kernels have
+    non-finite values. Should still return successfully with no AI points plotted.
+    """
+    import numpy as np
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        csv_path = Path(tmpdir) / "roofline.csv"
+        csv_path.write_text(
+            "device,HBMBw,L2Bw,L1Bw,LDSBw,FP32Flops,MFMAF32Flops\n"
+            "0,1000.0,2000.0,3000.0,4000.0,5000.0,8000.0\n"
+        )
+
+        roofline_instance, workload, config, arch_config = create_roofline_instance(
+            tmpdir
+        )
+
+        # All kernels have non-finite values (mix of NaN and Inf)
+        ai_data = {
+            "ai_hbm": [[np.nan, np.inf], [-np.inf, np.nan]],
+            "kernelNames": ["kernel_nan", "kernel_inf"],
+        }
+
+        ceiling_data = create_ceiling_data()
+
+        with (
+            mock.patch("roofline.calc_ai_analyze", return_value=ai_data),
+            mock.patch("roofline.construct_roof", return_value=ceiling_data),
+            mock.patch("roofline.console_warning") as mock_warning,
+        ):
+            result = roofline_instance.cli_generate_plot(
+                "FP32", workload, config, arch_config
+            )
+
+        assert result is not None
+        assert isinstance(result, str)
+
+        non_finite_warnings = [
+            call
+            for call in mock_warning.call_args_list
+            if len(call.args) >= 2 and "not finite" in str(call.args[1])
+        ]
+
+        # Both kernels should trigger a warning
+        assert len(non_finite_warnings) == 2
+        warning_msgs = [str(call.args[1]) for call in non_finite_warnings]
+        assert any("kernel_nan" in msg for msg in warning_msgs)
+        assert any("kernel_inf" in msg for msg in warning_msgs)
+
+
+def test_cli_generate_plot_all_valid_values():
+    """
+    Test that cli_generate_plot does not emit non-finite warnings when all
+    kernel AI values are valid finite positive numbers.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        csv_path = Path(tmpdir) / "roofline.csv"
+        csv_path.write_text(
+            "device,HBMBw,L2Bw,L1Bw,LDSBw,FP32Flops,MFMAF32Flops\n"
+            "0,1000.0,2000.0,3000.0,4000.0,5000.0,8000.0\n"
+        )
+
+        roofline_instance, workload, config, arch_config = create_roofline_instance(
+            tmpdir
+        )
+
+        # All kernels have valid finite positive values
+        ai_data = {
+            "ai_hbm": [[1.5, 3.0], [100.0, 200.0]],
+            "kernelNames": ["kernel_a", "kernel_b"],
+        }
+
+        ceiling_data = create_ceiling_data()
+
+        with (
+            mock.patch("roofline.calc_ai_analyze", return_value=ai_data),
+            mock.patch("roofline.construct_roof", return_value=ceiling_data),
+            mock.patch("roofline.console_warning") as mock_warning,
+        ):
+            result = roofline_instance.cli_generate_plot(
+                "FP32", workload, config, arch_config
+            )
+
+        assert result is not None
+        assert isinstance(result, str)
+
+        # No non-finite warnings should have been emitted
+        non_finite_warnings = [
+            call
+            for call in mock_warning.call_args_list
+            if len(call.args) >= 2 and "not finite" in str(call.args[1])
+        ]
+        assert len(non_finite_warnings) == 0
+
+
+# =============================================================================
 # TESTS FOR NOISE_CLAMP: Multi-Pass Profiling Variance Handling
 # =============================================================================
 
